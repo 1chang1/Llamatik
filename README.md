@@ -126,6 +126,8 @@ expect object LlamaBridge {
         onDone: () -> Unit,
         onError: (String) -> Unit
     )
+
+    fun nativeCancelGenerate()                        // cancel generation
 }
 
 interface GenStream {
