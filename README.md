@@ -272,7 +272,8 @@ All contributions are welcome!
 
 ## 📜 License
 
-[MIT](./LICENSE)
+This project is licensed under the MIT License.
+See [MIT](./LICENSE) for details.
 
 ---
 
