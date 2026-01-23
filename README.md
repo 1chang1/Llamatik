@@ -94,6 +94,7 @@ The **Llamatik App** showcases:
 
 ## 🧱 Architecture
 
+```
 Your App
 │
 ▼
@@ -102,6 +103,7 @@ LlamaBridge (shared Kotlin API)
 ├─ llamatik-core     → Native llama.cpp (on-device)
 ├─ llamatik-client   → Remote HTTP inference
 └─ llamatik-backend  → llama.cpp-compatible server
+```
 
 Switching between **local and remote inference requires no API changes** —
 only configuration.
