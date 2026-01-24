@@ -66,6 +66,32 @@ jobs:
           echo "libtool version:"
           libtool --version || true
 
+      - name: Resolve Linux tool paths
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "which libtool:"
+          which libtool || true
+          echo "ls -la /usr/bin/libtool:"
+          ls -la /usr/bin/libtool || true
+
+          # Export for subsequent steps (GitHub Actions env)
+          if [ -x /usr/bin/libtool ]; then
+            echo "LIBTOOL_PATH=/usr/bin/libtool" >> $GITHUB_ENV
+          else
+            # Fallback: try to locate it
+            LT="$(command -v libtool || true)"
+            if [ -n "$LT" ]; then
+              echo "LIBTOOL_PATH=$LT" >> $GITHUB_ENV
+            else
+              echo "ERROR: libtool not found even after install"
+              exit 1
+            fi
+          fi
+
+          echo "LIBTOOL_PATH will be: $LIBTOOL_PATH"
+
       - name: Install macOS deps
         if: ${{ runner.os == 'macOS' }}
         shell: bash
@@ -83,6 +109,39 @@ jobs:
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
           refreshenv
           cmake --version
+
+      - name: Resolve Windows tool paths
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          Write-Host "where cmake:"
+          where.exe cmake || $true
+
+          $candidates = @(
+            "C:\Program Files\CMake\bin\cmake.exe",
+            "C:\ProgramData\chocolatey\bin\cmake.exe"
+          )
+
+          $cmake = $null
+          foreach ($c in $candidates) {
+            if (Test-Path $c) { $cmake = $c; break }
+          }
+
+          if (-not $cmake) {
+            # Try resolving via where
+            $w = (where.exe cmake 2>$null | Select-Object -First 1)
+            if ($w) { $cmake = $w }
+          }
+
+          if (-not $cmake) {
+            Write-Error "cmake.exe not found after install"
+            exit 1
+          }
+
+          Write-Host "Resolved CMAKE_PATH=$cmake"
+          "CMAKE_PATH=$cmake" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          & $cmake --version
 
       # ---------- Build ----------
       - name: Build desktop distributables (Compose Multiplatform)
