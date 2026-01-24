@@ -52,7 +52,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            libtool-bin \
             libtool \
+            automake \
+            autoconf \
             libasound2-dev \
             libgtk-3-dev \
             libx11-dev \
@@ -63,34 +66,69 @@ jobs:
             libxi-dev \
             libxkbcommon-x11-0
 
-          echo "libtool version:"
-          libtool --version || true
+          echo "which libtool:"
+          command -v libtool || true
+          echo "which libtoolize:"
+          command -v libtoolize || true
 
       - name: Resolve Linux tool paths
         if: ${{ runner.os == 'Linux' }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "which libtool:"
-          which libtool || true
-          echo "ls -la /usr/bin/libtool:"
-          ls -la /usr/bin/libtool || true
 
-          # Export for subsequent steps (GitHub Actions env)
-          if [ -x /usr/bin/libtool ]; then
-            echo "LIBTOOL_PATH=/usr/bin/libtool" >> $GITHUB_ENV
-          else
-            # Fallback: try to locate it
-            LT="$(command -v libtool || true)"
-            if [ -n "$LT" ]; then
-              echo "LIBTOOL_PATH=$LT" >> $GITHUB_ENV
-            else
-              echo "ERROR: libtool not found even after install"
-              exit 1
+          LT="$(command -v libtool || true)"
+          if [ -z "$LT" ]; then
+            echo "libtool not found; trying libtoolize..."
+            LTZ="$(command -v libtoolize || true)"
+            if [ -n "$LTZ" ]; then
+              # Some projects incorrectly call this "libtool"; point LIBTOOL_PATH at libtoolize
+              echo "LIBTOOL_PATH=$LTZ" >> "$GITHUB_ENV"
+              echo "Using LIBTOOL_PATH=$LTZ"
+              exit 0
             fi
+            echo "ERROR: neither libtool nor libtoolize found"
+            exit 1
           fi
 
-          echo "LIBTOOL_PATH will be: $LIBTOOL_PATH"
+          echo "LIBTOOL_PATH=$LT" >> "$GITHUB_ENV"
+          echo "Using LIBTOOL_PATH=$LT"
+
+      - name: Set LIBTOOL_PATH on Windows (CI workaround)
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          "LIBTOOL_PATH=$env:WINDIR\System32\cmd.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "LIBTOOL_PATH set (workaround)"
+
+      - name: Resolve Windows tool paths
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          where.exe cmake || $true
+
+          $candidates = @(
+            "C:\Program Files\CMake\bin\cmake.exe",
+            "C:\ProgramData\chocolatey\bin\cmake.exe"
+          )
+
+          $cmake = $null
+          foreach ($c in $candidates) {
+            if (Test-Path $c) { $cmake = $c; break }
+          }
+
+          if (-not $cmake) {
+            $w = (where.exe cmake 2>$null | Select-Object -First 1)
+            if ($w) { $cmake = $w }
+          }
+
+          if (-not $cmake) {
+            Write-Error "cmake.exe not found after install"
+            exit 1
+          }
+
+          "CMAKE_PATH=$cmake" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & $cmake --version
 
       - name: Install macOS deps
         if: ${{ runner.os == 'macOS' }}
