@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -70,6 +71,8 @@ import com.llamatik.app.permissions.rememberAudioPermissionRequester
 import com.llamatik.app.permissions.rememberNotificationPermissionRequester
 import com.llamatik.app.platform.AudioPaths
 import com.llamatik.app.platform.AudioRecorder
+import com.llamatik.app.platform.decodeImageBytesToImageBitmap
+import com.llamatik.app.platform.rgbaToImageBitmap
 import com.llamatik.app.resources.Res
 import com.llamatik.app.resources.a_pair_of_llamas_in_a_field_with_clouds_and_mounta
 import com.llamatik.app.ui.components.LlamatikDialog
@@ -99,6 +102,7 @@ class ChatBotTabScreen : Screen {
         val loadingEmbedModelName = remember { mutableStateOf<String?>(null) }
         val loadingGenerateModelName = remember { mutableStateOf<String?>(null) }
         val loadingSttModelName = remember { mutableStateOf<String?>(null) }
+        val loadingStableDiffusionModelName = remember { mutableStateOf<String?>(null) }
 
         val viewModel = koinScreenModel<ChatBotViewModel>(
             parameters = { ParametersHolder(listOf(navigator).toMutableList(), false) }
@@ -125,6 +129,7 @@ class ChatBotTabScreen : Screen {
             loadingEmbedModelName = loadingEmbedModelName,
             loadingGenerateModelName = loadingGenerateModelName,
             loadingSttModelName = loadingSttModelName,
+            loadingStableDiffusionModelName = loadingStableDiffusionModelName,
         )
 
         LlamatikTheme {
@@ -197,14 +202,17 @@ class ChatBotTabScreen : Screen {
                     selectedEmbedModelName = state.selectedEmbedModelName,
                     selectedGenerateModelName = state.selectedGenerateModelName,
                     selectedSttModelName = state.selectedSttModelName,
+                    selectedStableDiffusionModelName = state.selectedStableDiffusionModelName,
 
                     embedModels = state.embedModels,
                     generateModels = state.generateModels,
                     sttModels = state.sttModels,
+                    stableDiffusionModels = state.stableDiffusionModels,
 
                     loadingEmbedModelName = loadingEmbedModelName.value,
                     loadingGenerateModelName = loadingGenerateModelName.value,
                     loadingSttModelName = loadingSttModelName.value,
+                    loadingStableDiffusionModelName = loadingStableDiffusionModelName.value,
 
                     onEmbedModelSelectedClicked = { model ->
                         loadingEmbedModelName.value = model.name
@@ -217,6 +225,10 @@ class ChatBotTabScreen : Screen {
                     onSttModelSelectedClicked = { model ->
                         loadingSttModelName.value = model.name
                         viewModel.onSttModelSelected(model)
+                    },
+                    onStableDiffusionModelSelectedClicked = { model ->
+                        loadingStableDiffusionModelName.value = model.name
+                        viewModel.onStableDiffusionModelSelected(model)
                     },
 
                     onDownloadModelClicked = { model ->
@@ -257,6 +269,10 @@ class ChatBotTabScreen : Screen {
             AvailableLanguages.DE -> "de"
             AvailableLanguages.RU -> "ru"
             AvailableLanguages.CN -> "zh"
+            AvailableLanguages.PT -> "pt"
+            AvailableLanguages.HI -> "hi"
+            AvailableLanguages.FA -> "fa"
+            AvailableLanguages.JA -> "ja"
         }
     }
 
@@ -269,6 +285,7 @@ class ChatBotTabScreen : Screen {
         loadingEmbedModelName: MutableState<String?>,
         loadingGenerateModelName: MutableState<String?>,
         loadingSttModelName: MutableState<String?>,
+        loadingStableDiffusionModelName: MutableState<String?>,
     ) {
         val sideEffects = viewModel.sideEffects.collectAsState(ChatBotSideEffects.Initial)
         sideEffects.value.apply {
@@ -305,6 +322,11 @@ class ChatBotTabScreen : Screen {
                     showModelSelectorSheet.value = false
                 }
 
+                ChatBotSideEffects.OnStableDiffusionModelLoaded -> {
+                    loadingStableDiffusionModelName.value = null
+                    showModelSelectorSheet.value = false
+                }
+
                 ChatBotSideEffects.OnSettingsChanged -> {
                     showSettingsSheet.value = false
                 }
@@ -319,6 +341,10 @@ class ChatBotTabScreen : Screen {
 
                 ChatBotSideEffects.OnSttModelLoadError -> {
                     loadingSttModelName.value = null
+                }
+
+                ChatBotSideEffects.OnStableDiffusionModelLoadError -> {
+                    loadingStableDiffusionModelName.value = null
                 }
             }
         }
@@ -624,6 +650,19 @@ class ChatBotTabScreen : Screen {
     ) {
         val clipboard = LocalClipboardManager.current
 
+        // Encoded images (PNG/JPEG/WEBP/PPM) – kept for future/back-compat.
+        val encodedImageBitmap = remember(message.imagePng) {
+            message.imagePng?.let { decodeImageBytesToImageBitmap(it, message.imageFileName) }
+        }
+
+        // StableDiffusion currently returns raw RGBA bytes.
+        val rgbaImageBitmap = remember(message.imageRgba, message.imageWidth, message.imageHeight) {
+            val rgba = message.imageRgba ?: return@remember null
+            val w = message.imageWidth ?: return@remember null
+            val h = message.imageHeight ?: return@remember null
+            rgbaToImageBitmap(w, h, rgba)
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -653,8 +692,26 @@ class ChatBotTabScreen : Screen {
                     )
                     .padding(16.dp)
             ) {
-                Text(text = message.text)
+                if (message.hasImage) {
+                    val bitmapToShow = rgbaImageBitmap ?: encodedImageBitmap
+                    if (bitmapToShow != null) {
+                        Image(
+                            bitmap = bitmapToShow,
+                            contentDescription = message.imageFileName ?: "Generated image",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(260.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                        )
+                    } else {
+                        Text("🖼️ Failed to decode image.")
+                    }
+                } else {
+                    Text(text = message.text)
+                }
             }
+
             Row(
                 modifier = Modifier.align(if (message.isFromMe) Alignment.End else Alignment.Start),
                 verticalAlignment = Alignment.CenterVertically
@@ -669,39 +726,36 @@ class ChatBotTabScreen : Screen {
 
                 Spacer(modifier = Modifier.size(8.dp))
 
-                IconButton(
-                    onClick = { clipboard.setText(AnnotatedString(message.text)) },
-                    modifier = Modifier.size(32.dp)
-                ) {
-                    Icon(
-                        imageVector = LlamatikIcons.Copy,
-                        contentDescription = localization.copy
-                    )
-                }
+                if (!message.hasImage) {
+                    IconButton(
+                        onClick = { clipboard.setText(AnnotatedString(message.text)) },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = LlamatikIcons.Copy,
+                            contentDescription = localization.copy
+                        )
+                    }
 
-                IconButton(
-                    onClick = {
-                        if (isSpeaking) onStop() else onSpeak(message.text)
-                    },
-                    modifier = Modifier.size(32.dp)
-                ) {
-                    Icon(
-                        imageVector = if (isSpeaking) LlamatikIcons.Stop else LlamatikIcons.Sound,
-                        contentDescription = if (isSpeaking) {
-                            localization.stop
-                        } else {
-                            localization.speak
-                        }
-                    )
+                    IconButton(
+                        onClick = {
+                            if (isSpeaking) onStop() else onSpeak(message.text)
+                        },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (isSpeaking) LlamatikIcons.Stop else LlamatikIcons.Sound,
+                            contentDescription = if (isSpeaking) localization.stop else localization.speak
+                        )
+                    }
                 }
 
                 if (showLoading) {
                     Spacer(modifier = Modifier.size(8.dp))
                     CircularProgressIndicator(
-                        modifier =
-                            Modifier
-                                .size(10.dp)
-                                .align(Alignment.CenterVertically)
+                        modifier = Modifier
+                            .size(10.dp)
+                            .align(Alignment.CenterVertically)
                     )
                 }
             }
@@ -760,6 +814,7 @@ class ChatBotTabScreen : Screen {
     ) {
         Surface(
             modifier = Modifier
+                .widthIn(max = 400.dp)
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             shape = RoundedCornerShape(16.dp),
@@ -768,7 +823,7 @@ class ChatBotTabScreen : Screen {
         ) {
             Row(
                 modifier = Modifier
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal =  12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
