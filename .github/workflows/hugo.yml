@@ -104,6 +104,34 @@ jobs:
             cp "${OUT_DIR}/index.html" "${OUT_DIR}/404.html"
           fi
 
+          # ------------------------------------------------------------
+          # IMPORTANT FIX:
+          # Some Kotlin/Compose WASM builds (and/or your loader) request
+          # assets via absolute URLs like /kotlin/...
+          # Your screenshot shows:
+          #   https://www.llamatik.com/kotlin/llamatik_wasm/llamatik_wasm.mjs  (404)
+          #
+          # So we mirror the kotlin runtime folder to site root:
+          #   homepage/static/kotlin/...
+          # ------------------------------------------------------------
+          ROOT_KOTLIN_DIR="homepage/static/kotlin"
+          rm -rf "${ROOT_KOTLIN_DIR}"
+          mkdir -p "${ROOT_KOTLIN_DIR}"
+
+          # 1) Copy kotlin runtime from the distribution if present
+          if [ -d "${DIST_DIR}/kotlin" ]; then
+            cp -R "${DIST_DIR}/kotlin/"* "${ROOT_KOTLIN_DIR}/"
+          fi
+
+          # 2) Safety net: also copy the engine artifacts generated into the library resources
+          #    (this ensures kotlin/llamatik_wasm/llamatik_wasm.{mjs,wasm} exist)
+          if [ -d "library/src/wasmJsMain/resources/kotlin" ]; then
+            cp -R "library/src/wasmJsMain/resources/kotlin/"* "${ROOT_KOTLIN_DIR}/"
+          fi
+
+          echo "Root kotlin assets staged at: ${ROOT_KOTLIN_DIR}"
+          echo "Expecting engine at: ${ROOT_KOTLIN_DIR}/llamatik_wasm/llamatik_wasm.mjs"
+
       # ---------------------------
       # Hugo build
       # ---------------------------
