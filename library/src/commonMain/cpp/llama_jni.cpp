@@ -538,69 +538,95 @@ static std::string generate_with_optional_grammar(const char *prompt, const char
     float repeat_penalty = g_repeat_penalty.load();
     int max_new_tokens = g_max_new_tokens.load();
 
-    llama_sampler *sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    if (grammar && grammar[0]) {
-        // Hard constraint first
-        llama_sampler_chain_add(sampler, llama_sampler_init_grammar(vocab, grammar, "root"));
-    }
-    llama_sampler_chain_add(sampler, llama_sampler_init_penalties(128, repeat_penalty, 0.0f, 0.10f));
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_k(top_k));
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(top_p, 1));
-    llama_sampler_chain_add(sampler, llama_sampler_init_temp(temperature));
-    llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
-
-    int cur_pos = batch.n_tokens;
-    std::string output;
-    char buf[8192];
-    char sp[64];
-
-    for (int i = 0; i < max_new_tokens; ++i) {
-        if (g_cancel_requested.load(std::memory_order_relaxed)) {
-            break;
+    // Try with grammar first; if it crashes, retry without grammar
+    bool use_grammar = grammar && grammar[0];
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        llama_sampler *sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
+        if (use_grammar && attempt == 0) {
+            llama_sampler_chain_add(sampler, llama_sampler_init_grammar(vocab, grammar, "root"));
         }
+        llama_sampler_chain_add(sampler, llama_sampler_init_penalties(128, repeat_penalty, 0.0f, 0.10f));
+        llama_sampler_chain_add(sampler, llama_sampler_init_top_k(top_k));
+        llama_sampler_chain_add(sampler, llama_sampler_init_top_p(top_p, 1));
+        llama_sampler_chain_add(sampler, llama_sampler_init_temp(temperature));
+        llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
-        llama_token tok = llama_sampler_sample(sampler, gen_ctx, -1);
-        if (tok < 0) break;
-        if (tok == llama_vocab_eos(vocab)) break;
+        int cur_pos = batch.n_tokens;
+        std::string output;
+        char buf[8192];
+        char sp[64];
+        bool grammar_error = false;
 
-        // early stop on chat EOT tokens if they appear
-        int sn = llama_token_to_piece(vocab, tok, sp, (int) sizeof(sp), 0, /*special*/ 1);
-        if (sn > 0) {
-            sp[std::min(sn, (int) sizeof(sp) - 1)] = '\0';
-            if (std::strcmp(sp, "<end_of_turn>") == 0 || std::strcmp(sp, "<|eot_id|>") == 0 || std::strcmp(sp, "<start_of_turn>") == 0) {
-                break;
+        // Re-decode prompt for retry attempt (KV cache was consumed)
+        if (attempt > 0) {
+            llama_memory_clear(llama_get_memory(gen_ctx), false);
+            if (llama_decode(gen_ctx, batch) != 0) {
+                llama_sampler_free(sampler);
+                llama_batch_free(batch);
+                return "";
             }
         }
 
-        llama_sampler_accept(sampler, tok);
+        try {
+            for (int i = 0; i < max_new_tokens; ++i) {
+                if (g_cancel_requested.load(std::memory_order_relaxed)) {
+                    break;
+                }
 
-        int nn = llama_token_to_piece(vocab, tok, buf, (int) sizeof(buf), 0, /*special*/ 0);
-        if (nn > 0) output.append(buf, nn);
+                llama_token tok = llama_sampler_sample(sampler, gen_ctx, -1);
+                if (tok < 0) break;
+                if (tok == llama_vocab_eos(vocab)) break;
 
-        if (cur_pos >= n_ctx) break;
+                int sn = llama_token_to_piece(vocab, tok, sp, (int) sizeof(sp), 0, /*special*/ 1);
+                if (sn > 0) {
+                    sp[std::min(sn, (int) sizeof(sp) - 1)] = '\0';
+                    if (std::strcmp(sp, "<end_of_turn>") == 0 || std::strcmp(sp, "<|eot_id|>") == 0 || std::strcmp(sp, "<start_of_turn>") == 0) {
+                        break;
+                    }
+                }
 
-        llama_batch step = llama_batch_init(1, 0, 1);
-        step.n_tokens = 1;
-        step.token[0] = tok;
-        step.pos[0] = cur_pos++;
-        step.n_seq_id[0] = 1;
-        step.seq_id[0][0] = 0;
-        step.logits[0] = true;
+                llama_sampler_accept(sampler, tok);
 
-        if (llama_decode(gen_ctx, step) != 0) {
-            llama_batch_free(step);
-            break;
+                int nn = llama_token_to_piece(vocab, tok, buf, (int) sizeof(buf), 0, /*special*/ 0);
+                if (nn > 0) output.append(buf, nn);
+
+                if (cur_pos >= n_ctx) break;
+
+                llama_batch step = llama_batch_init(1, 0, 1);
+                step.n_tokens = 1;
+                step.token[0] = tok;
+                step.pos[0] = cur_pos++;
+                step.n_seq_id[0] = 1;
+                step.seq_id[0][0] = 0;
+                step.logits[0] = true;
+
+                if (llama_decode(gen_ctx, step) != 0) {
+                    llama_batch_free(step);
+                    break;
+                }
+                llama_batch_free(step);
+            }
+        } catch (const std::exception &e) {
+            LOGW("Grammar sampler error (attempt %d): %s", attempt, e.what());
+            grammar_error = true;
         }
-        llama_batch_free(step);
+
+        llama_sampler_free(sampler);
+
+        if (grammar_error && attempt == 0) {
+            // Retry without grammar constraint
+            continue;
+        }
+
+        llama_batch_free(batch);
+        if (sanitize) {
+            return sanitize_generation(output);
+        }
+        return trim(output);
     }
 
-    llama_sampler_free(sampler);
     llama_batch_free(batch);
-
-    if (sanitize) {
-        return sanitize_generation(output);
-    }
-    return trim(output);
+    return "";
 }
 
 extern "C"
@@ -898,57 +924,65 @@ static void stream_from_prompt(
     char piece_buf[768];
     char spec_buf[64];
 
-    for (int i = 0; i < max_new_tokens; ++i) {
-        if (g_cancel_requested.load(std::memory_order_relaxed)) {
-            break;
-        }
-
-        llama_token tok = llama_sampler_sample(sampler, gen_ctx, -1);
-        if (tok < 0) break;
-        if (tok == llama_vocab_eos(vocab)) break;
-
-        int sn = llama_token_to_piece(vocab,
-                tok, spec_buf, (int) sizeof(spec_buf),
-                /* lstrip */ 0, /* special */ 1);
-        if (sn > 0) {
-            spec_buf[std::min(sn, (int) sizeof(spec_buf) - 1)] = '\0';
-            if (is_eot_piece(spec_buf) || std::strcmp(spec_buf, "<start_of_turn>") == 0) {
+    try {
+        for (int i = 0; i < max_new_tokens; ++i) {
+            if (g_cancel_requested.load(std::memory_order_relaxed)) {
                 break;
             }
-        }
 
-        llama_sampler_accept(sampler, tok);
+            llama_token tok = llama_sampler_sample(sampler, gen_ctx, -1);
+            if (tok < 0) break;
+            if (tok == llama_vocab_eos(vocab)) break;
 
-        int nn = llama_token_to_piece(vocab,
-                tok, piece_buf, (int) sizeof(piece_buf),
-                /* lstrip */ 0, /* special */ 0);
-        if (nn > 0) {
-            piece_buf[std::min(nn, (int) sizeof(piece_buf) - 1)] = '\0';
-            jstring delta = env->NewStringUTF(piece_buf);
-            if (delta) {
-                env->CallVoidMethod(jCallback, m.onDelta, delta);
-                env->DeleteLocalRef(delta);
+            int sn = llama_token_to_piece(vocab,
+                    tok, spec_buf, (int) sizeof(spec_buf),
+                    /* lstrip */ 0, /* special */ 1);
+            if (sn > 0) {
+                spec_buf[std::min(sn, (int) sizeof(spec_buf) - 1)] = '\0';
+                if (is_eot_piece(spec_buf) || std::strcmp(spec_buf, "<start_of_turn>") == 0) {
+                    break;
+                }
             }
-        }
 
-        if (cur_pos >= n_ctx) break;
+            llama_sampler_accept(sampler, tok);
 
-        llama_batch step = llama_batch_init(1, 0, 1);
-        step.n_tokens = 1;
-        step.token[0] = tok;
-        step.pos[0] = cur_pos++;
-        step.n_seq_id[0] = 1;
-        step.seq_id[0][0] = 0;
-        step.logits[0] = true;
+            int nn = llama_token_to_piece(vocab,
+                    tok, piece_buf, (int) sizeof(piece_buf),
+                    /* lstrip */ 0, /* special */ 0);
+            if (nn > 0) {
+                piece_buf[std::min(nn, (int) sizeof(piece_buf) - 1)] = '\0';
+                jstring delta = env->NewStringUTF(piece_buf);
+                if (delta) {
+                    env->CallVoidMethod(jCallback, m.onDelta, delta);
+                    env->DeleteLocalRef(delta);
+                }
+            }
 
-        if (llama_decode(gen_ctx, step) != 0) {
+            if (cur_pos >= n_ctx) break;
+
+            llama_batch step = llama_batch_init(1, 0, 1);
+            step.n_tokens = 1;
+            step.token[0] = tok;
+            step.pos[0] = cur_pos++;
+            step.n_seq_id[0] = 1;
+            step.seq_id[0][0] = 0;
+            step.logits[0] = true;
+
+            if (llama_decode(gen_ctx, step) != 0) {
+                llama_batch_free(step);
+                env->CallVoidMethod(jCallback, m.onError, env->NewStringUTF("llama_decode failed mid-stream"));
+                llama_sampler_free(sampler);
+                llama_batch_free(batch);
+                return;
+            }
             llama_batch_free(step);
-            env->CallVoidMethod(jCallback, m.onError, env->NewStringUTF("llama_decode failed mid-stream"));
-            llama_sampler_free(sampler);
-            llama_batch_free(batch);
-            return;
         }
-        llama_batch_free(step);
+    } catch (const std::exception &e) {
+        LOGW("Grammar sampler error in stream: %s", e.what());
+        env->CallVoidMethod(jCallback, m.onError, env->NewStringUTF(e.what()));
+        llama_sampler_free(sampler);
+        llama_batch_free(batch);
+        return;
     }
 
     llama_sampler_free(sampler);
