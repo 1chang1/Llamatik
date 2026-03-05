@@ -261,6 +261,11 @@ static std::string sanitize_generation(std::string s) {
     return s;
 }
 
+// Forward declarations
+static std::string build_chat_prompt(const std::string &system_msg, const std::string &user_msg);
+static std::string build_user_with_context(const std::string &context_block, const std::string &user_question);
+static inline bool is_eot_piece(const char *s);
+
 static bool build_json_grammar(const char *json_schema, std::string &out_grammar, std::string &out_err) {
     try {
         const std::string schema_str = (json_schema && json_schema[0]) ? std::string(json_schema) : std::string("{}");
