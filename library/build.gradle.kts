@@ -413,7 +413,8 @@ kotlin {
                 cmakePath,
                 "-S", desktopJniSourceDir.absolutePath,
                 "-B", desktopJniBuildDir.absolutePath,
-                "-DCMAKE_BUILD_TYPE=Release"
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"
             )
 
             if (desktopPlatform == "macos") {

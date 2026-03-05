@@ -4,6 +4,17 @@ project(llama_jni_desktop LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+#
+# Ensure position independent code (PIC) for anything built in this tree.
+# This makes static archives safe to link into shared objects on ELF (Linux).
+#
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# On some toolchains forcing -fPIC explicitly is helpful (harmless on macOS).
+if(UNIX AND NOT APPLE)
+    add_compile_options(-fPIC)
+endif()
+
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
 
 set(LLAMA_CPP_DIR "${REPO_ROOT}/llama.cpp")
@@ -71,8 +82,27 @@ if(EXISTS "${STABLE_DIFFUSION_CPP_DIR}/CMakeLists.txt")
     set(SD_BUILD_SHARED_GGML_LIB OFF CACHE BOOL "" FORCE)
     set(SD_USE_SYSTEM_GGML OFF CACHE BOOL "" FORCE)
 
+    # Add stable-diffusion subproject. It will inherit CMAKE_POSITION_INDEPENDENT_CODE ON from above.
     add_subdirectory("${STABLE_DIFFUSION_CPP_DIR}" "${CMAKE_BINARY_DIR}/stable-diffusion")
     set(HAVE_SD ON)
+
+    #
+    # Defensive: ensure common possible SD target names are PIC.
+    # Different forks expose different target names — handle the common ones.
+    #
+    if(TARGET stable-diffusion)
+        set_property(TARGET stable-diffusion PROPERTY POSITION_INDEPENDENT_CODE ON)
+    endif()
+    if(TARGET stable_diffusion)
+        set_property(TARGET stable_diffusion PROPERTY POSITION_INDEPENDENT_CODE ON)
+    endif()
+    if(TARGET stable-diffusion-lib)
+        set_property(TARGET stable-diffusion-lib PROPERTY POSITION_INDEPENDENT_CODE ON)
+    endif()
+    if(TARGET stable_diffusion_static)
+        set_property(TARGET stable_diffusion_static PROPERTY POSITION_INDEPENDENT_CODE ON)
+    endif()
+
 else()
     message(WARNING "stable-diffusion.cpp not found at ${STABLE_DIFFUSION_CPP_DIR}. Desktop will build without SD.")
     add_compile_definitions(LLAMATIK_NO_SD=1)
