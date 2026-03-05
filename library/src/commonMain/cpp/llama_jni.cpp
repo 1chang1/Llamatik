@@ -147,13 +147,14 @@ static void drop_lines_with_prefix(std::string &s, const char *prefix_lc) {
 static std::string sanitize_generation(std::string s) {
     if (s.empty()) return s;
 
-    for (const char *stop: {"<end_of_turn>", "<|eot_id|>", "</s>"}) {
+    for (const char *stop: {"<end_of_turn>", "<|eot_id|>", "</s>", "<|im_end|>", "<|endoftext|>"}) {
         size_t p = s.find(stop);
         if (p != std::string::npos) { s = s.substr(0, p); }
     }
     drop_lines_with_prefix(s, "<start_of_turn>");
     drop_lines_with_prefix(s, "<|start_header_id|>");
     drop_lines_with_prefix(s, "<|end_header_id|>");
+    drop_lines_with_prefix(s, "<|im_start|>");
 
     {
         std::string sl = to_lower(s);
@@ -273,58 +274,64 @@ static bool build_json_grammar(const char *json_schema, std::string &out_grammar
 }
 
 static std::string build_json_prompt_single(const char *prompt) {
-    std::string p = prompt ? prompt : "";
-    p += "\n\nReturn ONLY JSON. No markdown, no prose.";
-    return p;
+    std::string user_msg = prompt ? prompt : "";
+    user_msg += "\n\nReturn ONLY JSON. No markdown, no prose.";
+    return build_chat_prompt("", user_msg);
 }
 
 static std::string build_json_prompt_chat(const std::string &system, const std::string &ctx, const std::string &user, bool has_schema) {
-    (void)system; // not used by this simplified prompt builder (kept for signature compatibility)
-    std::string p;
-    if (!ctx.empty()) {
-        p += "Context:\n";
-        p += ctx;
-        p += "\n\n";
-    }
-    p += "Request:\n";
-    p += user;
-    p += "\n\n";
-    if (has_schema) {
-        p += "Return ONLY JSON matching the provided JSON Schema. No markdown, no prose.";
-    } else {
-        p += "Return ONLY valid JSON. No markdown, no prose.";
-    }
-    return p;
+    std::string json_suffix = has_schema
+        ? "\n\nReturn ONLY JSON matching the provided JSON Schema. No markdown, no prose."
+        : "\n\nReturn ONLY valid JSON. No markdown, no prose.";
+
+    std::string user_msg = build_user_with_context(ctx, user) + json_suffix;
+    return build_chat_prompt(system, user_msg);
 }
 
-// ---------- Chat templating ----------
+// ---------- Chat templating (model-aware via llama_chat_apply_template) ----------
+
 static std::string build_user_with_context(const std::string &context_block,
         const std::string &user_question) {
-    auto t = [](const std::string &x) { return trim(x); };
-    if (t(context_block).empty()) return "QUESTION:\n" + user_question;
-    std::ostringstream oss;
-    oss << "CONTEXT:\n" << context_block << "\n\nQUESTION:\n" << user_question;
-    return oss.str();
+    if (trim(context_block).empty()) return user_question;
+    return context_block + "\n\n" + user_question;
 }
 
-static std::string build_chat_prompt_gemma(const std::string &system_msg,
+// Build a chat prompt using the model's built-in chat template.
+// Falls back to a generic ChatML format if no template is found.
+static std::string build_chat_prompt(const std::string &system_msg,
         const std::string &user_msg) {
-    std::ostringstream oss;
-    const std::string sys = (system_msg.empty()
-            ? "You are a careful assistant. Answer ONLY from the provided context. "
-              "If the context is insufficient, respond exactly: \"I don't have enough information in my sources.\" "
-              "Write 2–5 short sentences in plain text. Do not use bullets or numbering."
-            : system_msg + " Write 2–5 short sentences in plain text. Do not use bullets or numbering.");
+    // Get the template string from the loaded model (nullptr = default template)
+    const char *tmpl_str = gen_model ? llama_model_chat_template(gen_model, nullptr) : nullptr;
 
-    oss << "<start_of_turn>system\n"
-        << sys
-        << "\n<end_of_turn>\n"
-        << "<start_of_turn>user\n"
-        << user_msg
-        << "\n<end_of_turn>\n"
-        << "<start_of_turn>model\n"
-        << "ANSWER: ";
-    return oss.str();
+    std::vector<llama_chat_message> messages;
+    if (!system_msg.empty()) {
+        messages.push_back({"system", system_msg.c_str()});
+    }
+    messages.push_back({"user", user_msg.c_str()});
+
+    // First call: get required buffer size
+    int32_t needed = llama_chat_apply_template(
+            tmpl_str, messages.data(), messages.size(),
+            /*add_ass=*/true, nullptr, 0);
+
+    if (needed <= 0) {
+        // Fallback: generic ChatML format
+        LOGW("llama_chat_apply_template failed (ret=%d), using ChatML fallback", needed);
+        std::ostringstream oss;
+        if (!system_msg.empty()) {
+            oss << "<|im_start|>system\n" << system_msg << "<|im_end|>\n";
+        }
+        oss << "<|im_start|>user\n" << user_msg << "<|im_end|>\n"
+            << "<|im_start|>assistant\n";
+        return oss.str();
+    }
+
+    // Second call: fill the buffer
+    std::vector<char> buf(needed + 1);
+    llama_chat_apply_template(
+            tmpl_str, messages.data(), messages.size(),
+            /*add_ass=*/true, buf.data(), (int32_t) buf.size());
+    return std::string(buf.data(), needed);
 }
 
 // ===================================================================================
@@ -580,7 +587,7 @@ static std::string generate_with_optional_grammar(const char *prompt, const char
                 int sn = llama_token_to_piece(vocab, tok, sp, (int) sizeof(sp), 0, /*special*/ 1);
                 if (sn > 0) {
                     sp[std::min(sn, (int) sizeof(sp) - 1)] = '\0';
-                    if (std::strcmp(sp, "<end_of_turn>") == 0 || std::strcmp(sp, "<|eot_id|>") == 0 || std::strcmp(sp, "<start_of_turn>") == 0) {
+                    if (is_eot_piece(sp) || std::strcmp(sp, "<start_of_turn>") == 0 || std::strcmp(sp, "<|im_start|>") == 0) {
                         break;
                     }
                 }
@@ -700,7 +707,7 @@ Java_com_llamatik_library_platform_LlamaBridge_generate(JNIEnv *env, jobject, js
         int sn = llama_token_to_piece(llama_model_get_vocab(gen_model), tok, sp, (int) sizeof(sp), 0, 1);
         if (sn > 0) {
             sp[std::min(sn, (int) sizeof(sp) - 1)] = '\0';
-            if (std::strcmp(sp, "<end_of_turn>") == 0 || std::strcmp(sp, "<|eot_id|>") == 0) break;
+            if (is_eot_piece(sp)) break;
         }
 
         llama_sampler_accept(sampler, tok);
@@ -749,14 +756,8 @@ Java_com_llamatik_library_platform_LlamaBridge_generateWithContext(
     if (jContext) env->ReleaseStringUTFChars(jContext, pctx);
     if (jUser) env->ReleaseStringUTFChars(jUser, pusr);
 
-    if (trim(system).empty()) {
-        system = "You are a careful assistant. Answer ONLY from the provided context. "
-                 "If the context is insufficient, respond exactly: \"I don't have enough information in my sources.\" "
-                 "Write 2–5 short sentences in plain text. Do not use bullets or numbering.";
-    }
-
     std::string user_turn = build_user_with_context(ctx, user);
-    std::string prompt = build_chat_prompt_gemma(system, user_turn);
+    std::string prompt = build_chat_prompt(system, user_turn);
     jstring jp = env->NewStringUTF(prompt.c_str());
     jstring r = Java_com_llamatik_library_platform_LlamaBridge_generate(env, nullptr, jp);
     env->DeleteLocalRef(jp);
@@ -848,7 +849,10 @@ static bool resolve_stream_methods(JNIEnv *env, jobject cb, StreamMethods &m) {
 }
 
 static inline bool is_eot_piece(const char *s) {
-    return std::strcmp(s, "<end_of_turn>") == 0 || std::strcmp(s, "<|eot_id|>") == 0;
+    return std::strcmp(s, "<end_of_turn>") == 0
+        || std::strcmp(s, "<|eot_id|>") == 0
+        || std::strcmp(s, "<|im_end|>") == 0
+        || std::strcmp(s, "<|endoftext|>") == 0;
 }
 
 // Streams tokens from a prepared prompt string.
@@ -1138,14 +1142,8 @@ Java_com_llamatik_library_platform_LlamaBridge_nativeGenerateWithContextStream(
     if (jContext) env->ReleaseStringUTFChars(jContext, pctx);
     if (jUser) env->ReleaseStringUTFChars(jUser, pusr);
 
-    if (trim(system).empty()) {
-        system = "You are a careful assistant. Answer ONLY from the provided context. "
-                 "If the context is insufficient, respond exactly: \"I don't have enough information in my sources.\" "
-                 "Write 2–5 short sentences in plain text. Do not use bullets or numbering.";
-    }
-
     std::string user_turn = build_user_with_context(ctx, user);
-    std::string prompt = build_chat_prompt_gemma(system, user_turn);
+    std::string prompt = build_chat_prompt(system, user_turn);
 
     stream_from_prompt(env, prompt.c_str(), jCallback, m);
 }
